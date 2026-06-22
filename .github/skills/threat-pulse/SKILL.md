@@ -69,6 +69,11 @@ The Threat Pulse skill is a rapid, broad-spectrum security scan designed for the
 | 🟡 (no 🔴/🟠) | Top 1–2, broader prompts | Up to 3 posture skills | `📂 Proactive Hunting Suggestions` |
 | All ✅ | Skip | Skip | Omit entirely |
 
+10. **⛔ MANDATORY: The follow-up loop is stateful, memory-backed, and self-sustaining.** Three non-negotiable invariants that hold for the ENTIRE session (re-read this rule before any follow-up interaction):
+   - **(a) Memory is the source of truth, not the conversation.** The prompt pool lives ONLY in `/memories/session/threat-pulse-drilldowns.md`. It MUST be created the first time the pool is built (Phase 4 step 1) and is a hard precondition for rendering any selection list. If you are about to present follow-up options and this file does not exist, STOP and create it first. NEVER reconstruct the pool from conversation history — always `memory view` immediately before each `vscode_askQuestions` call.
+   - **(b) The loop re-presents itself automatically.** After EVERY completed drill-down, you MUST return to Phase 4 step 2 and call `vscode_askQuestions` again with the updated pool — without waiting for the user to ask for the menu. The only exits are the user selecting `Skip`, or an empty pool. "Bring the menu back up" should never be something the user has to request.
+   - **(c) The Quick Pick Call Contract is mechanical, not advisory.** Run the [Pre-Flight Checklist](#-pre-flight-checklist--run-mechanically-before-every-vscode_askquestions-call) and print the Pool Receipt line before every call. In particular: ZERO `recommended` keys, `multiSelect: true`, correct icon taxonomy (`🔍 📄 🎯 💾 🆕 🔄 📋`), and the `💾 / 🔄 / Skip` tail every iteration. Do not substitute an ad-hoc "Done" option for the contracted tail.
+
 ---
 
 ## Execution Workflow
@@ -143,6 +148,8 @@ The Threat Pulse skill is a rapid, broad-spectrum security scan designed for the
 **After rendering the report, present the user with a selectable list of follow-up actions — skill investigations, query file hunts, and IOC lookups.** Runs when at least one 🔴, 🟠, or 🟡 verdict exists (skip only when ALL verdicts are ✅).
 
 **This is a loop, not a one-shot.** After each action completes, re-present the selection list with the prompt pool updated. Tier depth (🔴/🟠 vs 🟡-only vs all ✅) follows Rule 8.
+
+> **⛔ Loop invariant — verify before EVERY iteration (per Rule 10):** (a) `/memories/session/threat-pulse-drilldowns.md` exists and was just re-read via `memory view` — if not, create/read it first; (b) you are re-presenting the menu *automatically* after the prior drill-down, not because the user asked; (c) the Pre-Flight Checklist passed and the Pool Receipt was printed. If any of the three is false, fix it before calling `vscode_askQuestions`. The loop only ends on `Skip` or an empty pool.
 
 **Prompt types (three categories, one unified list):**
 
@@ -587,11 +594,21 @@ OpenIncidents
 | extend TotalHighCritical = TotalHighCritical, TotalAll = TotalAll
 | project TotalHighCritical, TotalAll, ProviderIncidentId, Title, Severity, SevRank, AgeDisplay, AlertCount, 
     OwnerUPN, Tactics, Techniques, Accounts, Devices, Tags, PortalUrl, AlertNames, CreatedTime
+// --- Deduplicate by Title: keep one representative incident per title for variety ---
+| as AllOpenIncidents
+| join kind=leftouter (
+    AllOpenIncidents | summarize TitleDupCount = count() by Title
+) on Title
+| project-away Title1
+| order by Title asc, SevRank asc, bin(CreatedTime, 1d) desc, AlertCount desc
+| extend _rn = row_number(1, prev(Title) != Title)
+| where _rn == 1
+| project-away _rn
 | order by SevRank asc, bin(CreatedTime, 1d) desc, AlertCount desc
 | take 10
 ```
 
-**Purpose:** Top 10 open incidents with severity-ranked backfill (Critical→High→Medium→Low). In large envs, all slots fill with High/Critical; small envs backfill with Medium/Low. `TotalHighCritical` and `TotalAll` drive the adaptive report header ("Showing 10 of {TotalAll} open incidents ({TotalHighCritical} High/Critical)"). Joins SecurityAlert for MITRE tactics/techniques and extracts `Accounts` (UPN or AAD ObjectId, lowercased), `Devices` (hostname, lowercased), and `Tags` (from `Labels` — both AutoAssigned ML classifications and User-applied SOC tags) — each capped at 5 per incident — for cross-query correlation with Q3/Q4/Q6/Q7/Q12. Flags unassigned incidents (empty `OwnerUPN`).
+**Purpose:** Top 10 open incidents with severity-ranked backfill (Critical→High→Medium→Low). In large envs, all slots fill with High/Critical; small envs backfill with Medium/Low. `TotalHighCritical` and `TotalAll` drive the adaptive report header ("Showing 10 of {TotalAll} open incidents ({TotalHighCritical} High/Critical)") and are computed across **all** open incidents pre-dedup, so header counts stay accurate. The list is **deduplicated by `Title`** so the top 10 shows distinct incident types rather than near-identical rows — in noisy envs a single recurring title (password-spray, DLP rule) can otherwise monopolize all 10 slots; the single highest-priority representative per title is kept (severity → newest day → alert count) and `TitleDupCount` preserves the volume signal. Joins SecurityAlert for MITRE tactics/techniques and extracts `Accounts` (UPN or AAD ObjectId, lowercased), `Devices` (hostname, lowercased), and `Tags` (from `Labels` — both AutoAssigned ML classifications and User-applied SOC tags) — each capped at 5 per incident — for cross-query correlation with Q3/Q4/Q6/Q7/Q12. Flags unassigned incidents (empty `OwnerUPN`).
 
 **Sort:** `SevRank asc, bin(CreatedTime, 1d) desc, AlertCount desc` — severity tier first, then calendar day (newest first), then complexity within each day.
 
@@ -1374,6 +1391,7 @@ Insert `📂 Recommended Query Files` after **🎯 Recommended Actions**. Includ
 
 - **Q1:** `| Incident | Sev | Title | Age | Alerts | Owner | Tactics | Accounts | Devices | Tags |` — `Sev` = incident severity, Unassigned → `⚠️ Unassigned`, `Age` uses relative `AgeDisplay`, entity/tag columns render max 5 comma-separated.
   - When `TotalAll > 10`: prepend `**Showing 10 of {TotalAll} open incidents ({TotalHighCritical} High/Critical)** (sorted by severity, then newest, most complex first)`
+  - The list is deduplicated by Title (one representative per title). When an incident's `TitleDupCount > 1`, append `(+{TitleDupCount-1} more)` to its Title cell so recurring/noisy incident types remain visible without monopolizing the table.
   - When `TotalHighCritical == 0`: prepend `**No High/Critical incidents — showing top Medium/Low from {TotalAll} open**`
 - **Q1 incidents** must include `[#<id>](https://security.microsoft.com/incidents/<ProviderIncidentId>?tid=<tenant_id>)` links.
 - **Q2:** Classification breakdown + severity + MITRE tactics/techniques from TP closures. Always render even when Q1 is ✅.

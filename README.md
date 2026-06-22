@@ -6,6 +6,8 @@
 
 An investigation automation framework that combines **GitHub Copilot**, **VS Code Agent Skills**, and **Model Context Protocol (MCP) servers** to enable natural language security investigations. Ask questions like *"Investigate this user for the last 7 days"* or *"Is this IP malicious?"* and get comprehensive analysis with KQL queries, threat intelligence correlation, and professional reports.
 
+> 🖥️ **Also runs in the [GitHub Copilot app](https://github.com/features/ai/github-app) (desktop)** — ideal for **scheduled automations** (unattended Threat Pulse / Threat Intel Campaign runs). It uses a worktree-per-session model with a few setup differences from VS Code — see [Running in the GitHub Copilot App](#️-running-in-the-github-copilot-app-desktop).
+
 ### Quick Start (TL;DR)
 
 ```powershell
@@ -90,7 +92,7 @@ copy .vscode\mcp.json.template .vscode\mcp.json
 
 **Key Components:**
 - **25 Agent Skills** — Modular investigation workflows for incidents, users, devices, IoCs, authentication, scope drift (SPN/User/Device), MCP monitoring, exposure management, AI agent posture, app registration posture, identity posture, data security analysis, email threat posture, MITRE ATT&CK coverage, ingestion analysis, detection authoring, threat pulse scanning, SVG dashboards, and more
-- **7 MCP Server Integrations** — Sentinel Data Lake, Graph API, Defender XDR Triage, KQL Search, Microsoft Learn, Azure MCP Server, Sentinel Graph (private preview)
+- **6 MCP Server Integrations** — Sentinel Data Lake (incl. Exposure Graph tools), Graph API, Defender XDR Triage, KQL Search, Microsoft Learn, Azure MCP Server
 - **3 Local MCP Apps** — Interactive heatmaps, geographic attack maps, incident commenting
 - **Python Utilities** — HTML report generation with IP enrichment (geolocation, VPN detection, abuse scores, Shodan port/service/CVE intelligence)
 
@@ -424,7 +426,7 @@ copy .vscode/mcp.json.template .vscode/mcp.json
 ```
 
 The template includes inline documentation for each server. On first use, VS Code will prompt for:
-- **Entra ID login** — browser-based auth for Sentinel Data Lake, Graph, Triage, and Sentinel Graph servers
+- **Entra ID login** — browser-based auth for Sentinel Data Lake, Graph, and Triage servers
 - **[GitHub PAT](https://github.com/settings/tokens/new)** — for KQL Search MCP (schema intelligence and query discovery). Needs `public_repo` scope.
 
 See [MCP Server Setup](#-mcp-server-setup) below for per-server permissions and installation guides.
@@ -449,6 +451,51 @@ The `sentinel-incident-comment` MCP App requires an Azure Logic App backend. See
 
 ---
 
+## 🖥️ Running in the GitHub Copilot App (Desktop)
+
+This project also runs great in the **[GitHub Copilot app](https://github.com/features/ai/github-app)** (desktop), not just VS Code. The app is especially useful for **scheduled automations**: its built-in **Workflows** system runs skills unattended on a schedule — for example the [Daily Threat Pulse](automations/daily-threat-pulse.workflow.md) and [Weekly Threat Intel Campaign](automations/weekly-threat-intel-campaign.workflow.md) definitions in [`automations/`](automations/). It also runs each task in an isolated git worktree, so you can run multiple investigations in parallel without them colliding.
+
+> 📥 **Download:** [github.com/features/ai/github-app](https://github.com/features/ai/github-app)
+
+### Why use the app
+
+- **Scheduled automations (Workflows)** — run the Threat Pulse scan every morning, or the Threat Intel Campaign weekly, fully unattended. See [`automations/`](automations/) for ready-to-import, PII-free workflow definitions.
+- **Parallel, isolated sessions** — each session is its own git worktree + branch, so concurrent investigations don't step on each other.
+- **Background agents** — long-running hunts and report generation can run in the background while you keep working.
+
+### ⚠️ Caveats & differences vs VS Code
+
+The app behaves slightly differently from VS Code. The most important difference: **each session is a fresh git worktree**, and gitignored local files (`config.json`, `.env`, MCP config) do **not** exist in a newly created worktree — they live only in your main checkout. You need a small **post-checkout step** to copy them into each session, otherwise the first query fails with a missing-config error.
+
+| Concern | VS Code | GitHub Copilot app |
+|---|---|---|
+| **MCP config** | `.vscode/mcp.json` (per workspace) | **User scope:** `~/.copilot/mcp-config.json`. The platform servers and the `kql-search` `GITHUB_TOKEN` go here, not in `.vscode/mcp.json`. Authenticate once interactively so OAuth tokens cache and refresh silently in scheduled runs. |
+| **`config.json` / `.env`** | One copy in your workspace folder | Gitignored, so **absent in each new worktree** — must be copied in per session (see below). |
+| **Memory / tenant context** | VS Code AppData memory store (auto-loads ~200 lines) | `~/.copilot/memories/` (user) and `~/.copilot/memories/repo/` (repo). **Scheduled runs are non-interactive, so repo memory does NOT auto-load** — automation prompts must read the context file explicitly by path (the `automations/` definitions do this in STEP 1.5). |
+| **Sessions / workspace** | Single workspace folder, one branch | One git **worktree + branch per session**, created under your worktrees root (e.g. `~/copilot-worktrees/<repo>/<branch>`). Operate only inside the session worktree — never the main checkout. |
+
+#### Post-checkout workflow (persist config into each session)
+
+Because `config.json`, `.env`, and `.vscode/mcp.json` are gitignored, a freshly created worktree won't contain them. Set up a **`post-checkout` git hook** that copies them from your main checkout into the new worktree. Example (`.git/hooks/post-checkout`, marked executable):
+
+```bash
+#!/usr/bin/env bash
+# Copy gitignored local config from the main checkout into a fresh worktree/session.
+MAIN="/path/to/your/main/checkout"     # adjust to your primary clone
+for f in config.json .env .vscode/mcp.json; do
+  if [ ! -f "$f" ] && [ -f "$MAIN/$f" ]; then
+    mkdir -p "$(dirname "$f")"
+    cp "$MAIN/$f" "$f"
+  fi
+done
+```
+
+> Alternatively, define the same copy logic as a **per-session setup command** in the app. Either way the goal is identical: every session ends up with a valid `config.json`, `.env`, and MCP config before the first query runs.
+
+For **scheduled automations**, the workflow prompts in [`automations/`](automations/) also include a **STEP 1 bootstrap** that recreates `config.json` from known values if it's missing — a belt-and-suspenders guarantee for non-interactive runs (it never commits `config.json`, which stays gitignored).
+
+---
+
 ## 🔌 MCP Server Setup
 
 The system uses several Model Context Protocol (MCP) servers. All are **pre-configured** in [.vscode/mcp.json.template](.vscode/mcp.json.template) — copy it to `.vscode/mcp.json` to get started (see [Step 3 above](#3-configure-mcp-servers)). The sections below document permissions, tools, and installation guides for each server.
@@ -463,13 +510,14 @@ The system uses several Model Context Protocol (MCP) servers. All are **pre-conf
 | 4 | **KQL Search** | `npx -y kql-search-mcp` (stdio) | [Setup](https://www.npmjs.com/package/kql-search-mcp) | [GitHub PAT](https://github.com/settings/tokens/new) (`public_repo`) |
 | 5 | **Microsoft Learn** | `https://learn.microsoft.com/api/mcp` | [Setup](https://github.com/MicrosoftDocs/mcp) | None (free) |
 | 6 | **Azure MCP Server** | VS Code extension (stdio) | [Setup](https://learn.microsoft.com/en-us/azure/developer/azure-mcp-server/overview) | Contributor or Reader on subscription |
-| 7 | **Sentinel Graph** ⚠️ | `https://sentinel.microsoft.com/mcp/graph` | [Blog](https://techcommunity.microsoft.com/blog/microsoft-security-blog/uncover-hidden-security-risks-with-microsoft-sentinel-graph/4469437) | Sentinel Reader — *Private Preview* |
 
 ### 1. Microsoft Sentinel MCP Server
 
 **📖 [Installation Guide](https://learn.microsoft.com/en-us/copilot/security/developer/mcp-get-started)**
 
 **Tools:** `query_lake`, `search_tables`, `list_sentinel_workspaces`
+
+**Exposure Graph tools (bundled here):** `find_blastradius`, `find_exposure_perimeter`, `find_walkable_paths`, `find_connected_nodes`, `find_nodes`, `get_graph_context`, plus entity analysis (`analyze_user_entity`, `analyze_url_entity`, `analyze_application_entity`). These ship in the Data Lake server with no `graph_` prefix.
 
 **Permissions:**
 - **Log Analytics Reader** (minimum) — query workspace data
@@ -549,17 +597,6 @@ Install via VS Code extension: search "Azure MCP Server" in Extensions, or insta
 - **Contributor** — for write/modify operations (optional)
 
 **Configuration:** Requires `azure_mcp` parameters in `config.json` (tenant, subscription, resource group, workspace name) to avoid cross-tenant auth errors. See [Configure Environment](#2-configure-environment).
-
-### 7. Sentinel Graph MCP Server ⚠️ Private Preview
-
-> **Note:** Sentinel Graph is currently in **private preview** and not available to all customers. If your tenant does not have access, this server will fail to connect — you can safely remove it from `.vscode/mcp.json`. See the [announcement blog post](https://techcommunity.microsoft.com/blog/microsoft-security-blog/uncover-hidden-security-risks-with-microsoft-sentinel-graph/4469437) for details and enrollment.
-
-**Tools:** Entity graph exploration and relationship queries.
-
-**Permissions:**
-- **Sentinel Reader** (minimum)
-
-Pre-configured in `.vscode/mcp.json.template`. Browser-based Entra ID login on first use.
 
 ### Verify Setup
 
